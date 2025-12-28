@@ -41,38 +41,17 @@ func defaultHistogramOptions() *histogramOptions {
 
 // stopwords are common words that make poor anchors even at low frequency.
 // These words appear frequently in natural language but carry little semantic meaning.
+// NOTE: We intentionally exclude single-character punctuation and code keywords
+// because they ARE meaningful anchors in code diffs (e.g., matching "(" is important).
 var stopwords = map[string]bool{
-	// Articles and determiners
-	"a": true, "an": true, "the": true, "this": true, "that": true,
-	"these": true, "those": true, "some": true, "any": true,
-	// Prepositions
-	"in": true, "on": true, "at": true, "to": true, "for": true,
-	"of": true, "with": true, "by": true, "from": true, "as": true,
-	"into": true, "onto": true, "upon": true,
-	// Conjunctions
-	"and": true, "or": true, "but": true, "so": true, "yet": true,
-	// Common verbs
-	"is": true, "are": true, "was": true, "were": true, "be": true,
-	"been": true, "being": true, "have": true, "has": true, "had": true,
-	"do": true, "does": true, "did": true, "will": true, "would": true,
-	"could": true, "should": true, "may": true, "might": true, "must": true,
-	"can": true,
-	// Pronouns
-	"it": true, "its": true, "they": true, "their": true, "them": true,
-	"we": true, "our": true, "us": true, "you": true, "your": true,
-	"he": true, "she": true, "his": true, "her": true,
-	// Common adverbs
-	"not": true, "no": true, "yes": true, "also": true, "just": true,
-	"only": true, "then": true, "now": true, "here": true, "there": true,
-	// Single-character punctuation (common in code)
-	"-": true, ".": true, ",": true, ":": true, ";": true,
-	"(": true, ")": true, "[": true, "]": true, "{": true, "}": true,
-	"=": true, "+": true, "*": true, "/": true, "&": true, "|": true,
-	"<": true, ">": true, "!": true, "?": true, "@": true, "#": true,
-	"$": true, "%": true, "^": true, "~": true, "`": true,
-	// Common code tokens
-	"if": true, "else": true, "return": true, "nil": true, "null": true,
-	"true": true, "false": true, "err": true, "error": true,
+	// Articles and determiners - these truly have no semantic meaning
+	"a": true, "an": true, "the": true,
+	// Very common prepositions that often appear in unrelated contexts
+	"in": true, "on": true, "to": true, "for": true, "of": true, "with": true,
+	// Common conjunctions
+	"and": true, "or": true,
+	// Very common verbs that don't carry much meaning
+	"is": true, "are": true, "be": true,
 }
 
 // isStopword checks if a string element is a stopword.
@@ -188,17 +167,18 @@ func histogramDiffRecursive(a, b []Element, aOffset, bOffset int, opts *histogra
 		}
 	}
 
-	// No good anchor found - use simple delete+insert
-	// We intentionally DON'T fall back to Myers here because Myers will match
-	// stopwords like "the", "for", etc. which creates incoherent output.
-	// For word-level diff, it's better to show a clean delete+insert pair
-	// than to fragment the output with spurious matches.
+	// No good anchor found - fall back appropriately
+	// For small sections, use Myers which will find optimal matches.
+	// For larger sections, use simple delete+insert to avoid fragmentation.
 	if bestIdx == -1 || bestFreq > opts.maxChainLength {
-		// Only fall back to Myers for larger sections where fragmentation is less noticeable
-		if opts.fallbackToMyers && len(a)+len(b) > 50 {
+		// Small sections: use Myers to find optimal matches
+		// This handles cases like ["a", "b", "c"] vs ["a", "x", "c"] where
+		// even though "a" is a stopword, it should still match.
+		if opts.fallbackToMyers && len(a)+len(b) <= 20 {
 			return myersFallback(a, b, aOffset, bOffset)
 		}
-		// Simple fallback: all of A deleted, all of B inserted
+		// Large sections with no good anchors: prefer clean delete+insert
+		// over fragmented output with spurious stopword matches
 		return []DiffOp{
 			{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
 			{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},

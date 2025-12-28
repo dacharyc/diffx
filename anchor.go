@@ -39,101 +39,22 @@ func defaultAnchorOptions() *anchorOptions {
 // eliminateWeakAnchors converts semantically incoherent Equal regions to changes.
 // This is applied after the main diff algorithm and before boundary shifting.
 //
-// Two main transformations:
-// 1. Entire weak anchors: Short Equal regions with high-frequency elements,
-//    surrounded by changes, with no matching context.
-// 2. Boundary trimming: Stopwords at the edges of Equal regions that are
-//    adjacent to changes are trimmed off.
+// The main transformation is boundary trimming: stopwords at the edges of Equal
+// regions that are sandwiched between changes are converted to Delete+Insert pairs.
+// This produces cleaner output by not fragmenting unrelated text.
+//
+// Unlike earlier versions, we no longer apply aggressive "weak anchor" elimination
+// based on frequency, as this caused cascading effects where trimming one stopword
+// made adjacent non-stopwords appear sandwiched.
 func eliminateWeakAnchors(ops []DiffOp, a, b []Element) []DiffOp {
 	if len(ops) < 2 {
 		return ops
 	}
 
-	// First pass: trim stopwords from Equal boundaries
+	// Trim stopwords from Equal boundaries
 	ops = trimStopwordBoundaries(ops, a, b)
 
-	if len(ops) < 3 {
-		return mergeAdjacentOps(ops)
-	}
-
-	opts := defaultAnchorOptions()
-
-	// Build frequency map for both sequences
-	freq := make(map[uint64]int)
-	for _, e := range a {
-		freq[e.Hash()]++
-	}
-	for _, e := range b {
-		freq[e.Hash()]++
-	}
-
-	// Adjust threshold based on input size
-	total := len(a) + len(b)
-	opts.frequencyThreshold = 3 + total/200 // Scale with input size
-	if opts.frequencyThreshold < 3 {
-		opts.frequencyThreshold = 3
-	}
-	if opts.frequencyThreshold > 20 {
-		opts.frequencyThreshold = 20
-	}
-
-	result := make([]DiffOp, 0, len(ops))
-
-	for i, op := range ops {
-		if op.Type != Equal {
-			result = append(result, op)
-			continue
-		}
-
-		// Check if this Equal is sandwiched between changes
-		hasPrevChange := i > 0 && ops[i-1].Type != Equal
-		hasNextChange := i < len(ops)-1 && ops[i+1].Type != Equal
-
-		if !hasPrevChange || !hasNextChange {
-			// Not sandwiched - keep as Equal
-			result = append(result, op)
-			continue
-		}
-
-		// Check if this is a weak anchor
-		equalLen := op.AEnd - op.AStart
-		if equalLen > opts.maxWeakAnchorLen {
-			// Too long to be a weak anchor
-			result = append(result, op)
-			continue
-		}
-
-		// Check element frequencies
-		isWeak := isWeakAnchor(op, a, b, freq, opts)
-		if !isWeak {
-			result = append(result, op)
-			continue
-		}
-
-		// Check context similarity - if context matches, it's probably a real anchor
-		if hasMatchingContext(op, ops, i, a, b, opts.contextWindow) {
-			result = append(result, op)
-			continue
-		}
-
-		// This is a weak anchor - convert to Delete + Insert
-		result = append(result, DiffOp{
-			Type:   Delete,
-			AStart: op.AStart,
-			AEnd:   op.AEnd,
-			BStart: op.BStart,
-			BEnd:   op.BStart, // Empty B range for delete
-		})
-		result = append(result, DiffOp{
-			Type:   Insert,
-			AStart: op.AEnd,
-			AEnd:   op.AEnd, // Empty A range for insert
-			BStart: op.BStart,
-			BEnd:   op.BEnd,
-		})
-	}
-
-	return mergeAdjacentOps(result)
+	return mergeAdjacentOps(ops)
 }
 
 // isWeakAnchor checks if an Equal region consists of high-frequency elements.
@@ -227,12 +148,15 @@ func trimStopwordBoundaries(ops []DiffOp, a, b []Element) []DiffOp {
 			continue
 		}
 
-		// Check if this Equal is adjacent to changes
+		// Check if this Equal is SANDWICHED between changes (not just adjacent)
+		// We only want to trim stopwords from boundaries when they're truly
+		// bridging between unrelated content on both sides.
 		prevIsChange := i > 0 && ops[i-1].Type != Equal
 		nextIsChange := i < len(ops)-1 && ops[i+1].Type != Equal
 
-		if !prevIsChange && !nextIsChange {
-			// Not adjacent to any changes - keep as is
+		// Only process if sandwiched between changes on BOTH sides
+		if !prevIsChange || !nextIsChange {
+			// Not sandwiched - keep as is
 			result = append(result, op)
 			continue
 		}
