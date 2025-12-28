@@ -1,0 +1,348 @@
+package diffx
+
+// Histogram-style diff algorithm.
+//
+// This implements an approach similar to Git's histogram diff:
+// 1. Count element frequencies in both sequences
+// 2. Find the lowest-frequency element that appears in both (the best anchor)
+// 3. Split sequences at that anchor point
+// 4. Recursively apply to both halves
+// 5. Fall back to Myers when no good anchors exist
+//
+// This naturally avoids matching high-frequency elements like "the", "for", "-"
+// because they're never chosen as anchor points.
+//
+// References:
+// - JGit HistogramDiff (Eclipse License)
+// - raygard/hdiff (0BSD License)
+// - Bram Cohen's patience diff concept
+
+// histogramOptions configures histogram diff behavior.
+type histogramOptions struct {
+	// maxChainLength is the maximum frequency for an element to be considered
+	// as an anchor. Elements appearing more than this are ignored.
+	// Git uses 64 by default, but for word-level diff we use a lower value.
+	maxChainLength int
+
+	// fallbackToMyers controls whether to use Myers when no good anchors exist.
+	fallbackToMyers bool
+
+	// filterStopwords prevents common words from being used as anchors.
+	filterStopwords bool
+}
+
+func defaultHistogramOptions() *histogramOptions {
+	return &histogramOptions{
+		maxChainLength:  10, // Lower threshold for word-level diff
+		fallbackToMyers: true,
+		filterStopwords: true,
+	}
+}
+
+// stopwords are common words that make poor anchors even at low frequency.
+// These words appear frequently in natural language but carry little semantic meaning.
+var stopwords = map[string]bool{
+	// Articles and determiners
+	"a": true, "an": true, "the": true, "this": true, "that": true,
+	"these": true, "those": true, "some": true, "any": true,
+	// Prepositions
+	"in": true, "on": true, "at": true, "to": true, "for": true,
+	"of": true, "with": true, "by": true, "from": true, "as": true,
+	"into": true, "onto": true, "upon": true,
+	// Conjunctions
+	"and": true, "or": true, "but": true, "so": true, "yet": true,
+	// Common verbs
+	"is": true, "are": true, "was": true, "were": true, "be": true,
+	"been": true, "being": true, "have": true, "has": true, "had": true,
+	"do": true, "does": true, "did": true, "will": true, "would": true,
+	"could": true, "should": true, "may": true, "might": true, "must": true,
+	"can": true,
+	// Pronouns
+	"it": true, "its": true, "they": true, "their": true, "them": true,
+	"we": true, "our": true, "us": true, "you": true, "your": true,
+	"he": true, "she": true, "his": true, "her": true,
+	// Common adverbs
+	"not": true, "no": true, "yes": true, "also": true, "just": true,
+	"only": true, "then": true, "now": true, "here": true, "there": true,
+	// Single-character punctuation (common in code)
+	"-": true, ".": true, ",": true, ":": true, ";": true,
+	"(": true, ")": true, "[": true, "]": true, "{": true, "}": true,
+	"=": true, "+": true, "*": true, "/": true, "&": true, "|": true,
+	"<": true, ">": true, "!": true, "?": true, "@": true, "#": true,
+	"$": true, "%": true, "^": true, "~": true, "`": true,
+	// Common code tokens
+	"if": true, "else": true, "return": true, "nil": true, "null": true,
+	"true": true, "false": true, "err": true, "error": true,
+}
+
+// isStopword checks if a string element is a stopword.
+func isStopword(e Element) bool {
+	s, ok := e.(StringElement)
+	if !ok {
+		return false
+	}
+	return stopwords[string(s)]
+}
+
+// histogramDiff performs histogram-style diff on two element sequences.
+func histogramDiff(a, b []Element, opts *histogramOptions) []DiffOp {
+	if opts == nil {
+		opts = defaultHistogramOptions()
+	}
+
+	// Handle trivial cases
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	if len(a) == 0 {
+		return []DiffOp{{Type: Insert, AStart: 0, AEnd: 0, BStart: 0, BEnd: len(b)}}
+	}
+	if len(b) == 0 {
+		return []DiffOp{{Type: Delete, AStart: 0, AEnd: len(a), BStart: 0, BEnd: 0}}
+	}
+
+	// Trim common prefix
+	prefixLen := 0
+	for prefixLen < len(a) && prefixLen < len(b) && a[prefixLen].Equal(b[prefixLen]) {
+		prefixLen++
+	}
+
+	// Trim common suffix
+	suffixLen := 0
+	for suffixLen < len(a)-prefixLen && suffixLen < len(b)-prefixLen &&
+		a[len(a)-1-suffixLen].Equal(b[len(b)-1-suffixLen]) {
+		suffixLen++
+	}
+
+	// If everything matches, return Equal
+	if prefixLen+suffixLen >= len(a) && prefixLen+suffixLen >= len(b) {
+		return []DiffOp{{Type: Equal, AStart: 0, AEnd: len(a), BStart: 0, BEnd: len(b)}}
+	}
+
+	// Work on the middle section
+	aStart, aEnd := prefixLen, len(a)-suffixLen
+	bStart, bEnd := prefixLen, len(b)-suffixLen
+
+	// Build result with prefix
+	var result []DiffOp
+	if prefixLen > 0 {
+		result = append(result, DiffOp{Type: Equal, AStart: 0, AEnd: prefixLen, BStart: 0, BEnd: prefixLen})
+	}
+
+	// Diff the middle section
+	middleOps := histogramDiffRecursive(a[aStart:aEnd], b[bStart:bEnd], aStart, bStart, opts)
+	result = append(result, middleOps...)
+
+	// Add suffix
+	if suffixLen > 0 {
+		result = append(result, DiffOp{
+			Type:   Equal,
+			AStart: len(a) - suffixLen,
+			AEnd:   len(a),
+			BStart: len(b) - suffixLen,
+			BEnd:   len(b),
+		})
+	}
+
+	return mergeAdjacentOps(result)
+}
+
+// histogramDiffRecursive performs the core histogram algorithm on a section.
+func histogramDiffRecursive(a, b []Element, aOffset, bOffset int, opts *histogramOptions) []DiffOp {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	if len(a) == 0 {
+		return []DiffOp{{Type: Insert, AStart: aOffset, AEnd: aOffset, BStart: bOffset, BEnd: bOffset + len(b)}}
+	}
+	if len(b) == 0 {
+		return []DiffOp{{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset}}
+	}
+
+	// Build frequency histogram for sequence A
+	aFreq := make(map[uint64]int)
+	aIndices := make(map[uint64][]int) // hash -> list of indices in A
+	for i, e := range a {
+		h := e.Hash()
+		aFreq[h]++
+		aIndices[h] = append(aIndices[h], i)
+	}
+
+	// Find the best anchor: lowest-frequency element in B that exists in A
+	bestIdx := -1
+	bestFreq := opts.maxChainLength + 1
+	var bestHash uint64
+
+	for i, e := range b {
+		// Skip stopwords if filtering is enabled
+		if opts.filterStopwords && isStopword(e) {
+			continue
+		}
+
+		h := e.Hash()
+		freq := aFreq[h]
+		if freq > 0 && freq < bestFreq {
+			bestFreq = freq
+			bestIdx = i
+			bestHash = h
+		}
+	}
+
+	// No good anchor found - use simple delete+insert
+	// We intentionally DON'T fall back to Myers here because Myers will match
+	// stopwords like "the", "for", etc. which creates incoherent output.
+	// For word-level diff, it's better to show a clean delete+insert pair
+	// than to fragment the output with spurious matches.
+	if bestIdx == -1 || bestFreq > opts.maxChainLength {
+		// Only fall back to Myers for larger sections where fragmentation is less noticeable
+		if opts.fallbackToMyers && len(a)+len(b) > 50 {
+			return myersFallback(a, b, aOffset, bOffset)
+		}
+		// Simple fallback: all of A deleted, all of B inserted
+		return []DiffOp{
+			{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
+			{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},
+		}
+	}
+
+	// Find the matching position in A for this anchor
+	// Use the first occurrence for simplicity (could optimize for best position)
+	aMatchIdx := aIndices[bestHash][0]
+
+	// Verify the match (hash collision check)
+	if !a[aMatchIdx].Equal(b[bestIdx]) {
+		// Hash collision - try other occurrences
+		found := false
+		for _, idx := range aIndices[bestHash] {
+			if a[idx].Equal(b[bestIdx]) {
+				aMatchIdx = idx
+				found = true
+				break
+			}
+		}
+		if !found {
+			// No actual match - fall back
+			if opts.fallbackToMyers {
+				return myersFallback(a, b, aOffset, bOffset)
+			}
+			return []DiffOp{
+				{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
+				{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},
+			}
+		}
+	}
+
+	// Extend the match forward and backward to find the full matching region
+	matchStartA, matchStartB := aMatchIdx, bestIdx
+	matchEndA, matchEndB := aMatchIdx+1, bestIdx+1
+
+	// Extend backward
+	for matchStartA > 0 && matchStartB > 0 && a[matchStartA-1].Equal(b[matchStartB-1]) {
+		matchStartA--
+		matchStartB--
+	}
+
+	// Extend forward
+	for matchEndA < len(a) && matchEndB < len(b) && a[matchEndA].Equal(b[matchEndB]) {
+		matchEndA++
+		matchEndB++
+	}
+
+	// Recursively diff the sections before and after the match
+	var result []DiffOp
+
+	// Before the match
+	if matchStartA > 0 || matchStartB > 0 {
+		beforeOps := histogramDiffRecursive(
+			a[:matchStartA], b[:matchStartB],
+			aOffset, bOffset,
+			opts,
+		)
+		result = append(result, beforeOps...)
+	}
+
+	// The matching region
+	result = append(result, DiffOp{
+		Type:   Equal,
+		AStart: aOffset + matchStartA,
+		AEnd:   aOffset + matchEndA,
+		BStart: bOffset + matchStartB,
+		BEnd:   bOffset + matchEndB,
+	})
+
+	// After the match
+	if matchEndA < len(a) || matchEndB < len(b) {
+		afterOps := histogramDiffRecursive(
+			a[matchEndA:], b[matchEndB:],
+			aOffset+matchEndA, bOffset+matchEndB,
+			opts,
+		)
+		result = append(result, afterOps...)
+	}
+
+	return result
+}
+
+// myersFallback uses the standard Myers algorithm for a section.
+func myersFallback(a, b []Element, aOffset, bOffset int) []DiffOp {
+	// Create a temporary context for Myers diff
+	o := defaultOptions()
+	o.preprocessing = false  // Already preprocessed
+	o.postprocessing = false // Will be done after
+	o.anchorElimination = false
+
+	ctx := newDiffContext(a, b, o)
+	ctx.compareSeq(0, len(a), 0, len(b), false)
+	ops := ctx.buildOps()
+
+	// Adjust offsets
+	for i := range ops {
+		ops[i].AStart += aOffset
+		ops[i].AEnd += aOffset
+		ops[i].BStart += bOffset
+		ops[i].BEnd += bOffset
+	}
+
+	return ops
+}
+
+// DiffHistogram performs histogram-style diff on string slices.
+func DiffHistogram(a, b []string, opts ...Option) []DiffOp {
+	return DiffElementsHistogram(toElements(a), toElements(b), opts...)
+}
+
+// DiffElementsHistogram performs histogram-style diff on Element slices.
+func DiffElementsHistogram(a, b []Element, opts ...Option) []DiffOp {
+	// Apply options
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	origA, origB := a, b
+
+	histOpts := defaultHistogramOptions()
+
+	// Run histogram diff
+	ops := histogramDiff(a, b, histOpts)
+
+	// Apply anchor elimination if enabled
+	if o.anchorElimination {
+		ops = eliminateWeakAnchors(ops, origA, origB)
+	}
+
+	// Apply boundary shifting if enabled
+	if o.postprocessing {
+		ops = shiftBoundaries(ops, origA, origB)
+	}
+
+	return ops
+}
+
+// WithHistogram is an option to use histogram-style diff instead of Myers.
+// This can produce more readable output for files with many common elements.
+func WithHistogram(enabled bool) Option {
+	return func(o *options) {
+		o.useHistogram = enabled
+	}
+}

@@ -29,8 +29,10 @@ func (m *indexMapping) mapOps(ops []DiffOp) []DiffOp {
 			// For Equal operations, we need to expand them element by element
 			// because there may be filtered (changed) elements interspersed
 			for i := op.AStart; i < op.AEnd; i++ {
+				// i is index in filtered A; j is corresponding index in filtered B
+				j := op.BStart + (i - op.AStart)
 				origAIdx := m.aToOrig[i]
-				origBIdx := m.bToOrig[i]
+				origBIdx := m.bToOrig[j]
 
 				// Fill gap before this equal element
 				if origAIdx > aPos {

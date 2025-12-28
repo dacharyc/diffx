@@ -44,21 +44,24 @@ type DiffOp struct {
 
 // options holds configuration for the diff algorithm.
 type options struct {
-	useHeuristic   bool
-	forceMinimal   bool
-	costLimit      int
-	preprocessing  bool
-	postprocessing bool
+	useHeuristic       bool
+	forceMinimal       bool
+	costLimit          int
+	preprocessing      bool
+	postprocessing     bool
+	anchorElimination  bool
+	useHistogram       bool
 }
 
 // defaultOptions returns options with sensible defaults.
 func defaultOptions() *options {
 	return &options{
-		useHeuristic:   true,
-		forceMinimal:   false,
-		costLimit:      0, // auto-calculated
-		preprocessing:  true,
-		postprocessing: true,
+		useHeuristic:      true,
+		forceMinimal:      false,
+		costLimit:         0, // auto-calculated
+		preprocessing:     true,
+		postprocessing:    true,
+		anchorElimination: true,
 	}
 }
 
@@ -122,6 +125,11 @@ func DiffElements(a, b []Element, opts ...Option) []DiffOp {
 		opt(o)
 	}
 
+	// Use histogram diff if requested
+	if o.useHistogram {
+		return DiffElementsHistogram(a, b, opts...)
+	}
+
 	// Handle trivial cases
 	if len(a) == 0 && len(b) == 0 {
 		return nil
@@ -172,6 +180,12 @@ func DiffElements(a, b []Element, opts ...Option) []DiffOp {
 	// Map indices back to original sequences
 	if mapping != nil {
 		ops = mapping.mapOps(ops)
+	}
+
+	// Anchor elimination: remove weak anchors (short, high-frequency Equal regions)
+	// This must happen before boundary shifting so the shifted boundaries are clean
+	if o.anchorElimination {
+		ops = eliminateWeakAnchors(ops, origA, origB)
 	}
 
 	// Postprocessing: shift boundaries for readability
