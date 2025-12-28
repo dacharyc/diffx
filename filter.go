@@ -53,7 +53,6 @@ func (m *indexMapping) mapOps(ops []DiffOp) []DiffOp {
 						BStart: bPos,
 						BEnd:   origBIdx,
 					})
-					bPos = origBIdx
 				}
 
 				// Add the equal element
