@@ -14,55 +14,150 @@ type indexMapping struct {
 }
 
 // mapOps converts operations on filtered sequences back to original indices.
+// It also fills in delete/insert operations for elements that were filtered out.
 func (m *indexMapping) mapOps(ops []DiffOp) []DiffOp {
 	if m == nil {
 		return ops
 	}
 
-	result := make([]DiffOp, 0, len(ops))
+	// Expand operations to account for filtered elements
+	result := make([]DiffOp, 0, len(ops)*3)
+	aPos, bPos := 0, 0
+
 	for _, op := range ops {
-		mapped := DiffOp{Type: op.Type}
+		if op.Type == Equal {
+			// For Equal operations, we need to expand them element by element
+			// because there may be filtered (changed) elements interspersed
+			for i := op.AStart; i < op.AEnd; i++ {
+				origAIdx := m.aToOrig[i]
+				origBIdx := m.bToOrig[i]
 
-		// Map A indices
-		if op.AStart < len(m.aToOrig) {
-			mapped.AStart = m.aToOrig[op.AStart]
-		} else if len(m.aToOrig) > 0 {
-			mapped.AStart = m.aToOrig[len(m.aToOrig)-1] + 1
-		} else {
-			mapped.AStart = 0
+				// Fill gap before this equal element
+				if origAIdx > aPos {
+					result = append(result, DiffOp{
+						Type:   Delete,
+						AStart: aPos,
+						AEnd:   origAIdx,
+						BStart: bPos,
+						BEnd:   bPos,
+					})
+					aPos = origAIdx
+				}
+				if origBIdx > bPos {
+					result = append(result, DiffOp{
+						Type:   Insert,
+						AStart: aPos,
+						AEnd:   aPos,
+						BStart: bPos,
+						BEnd:   origBIdx,
+					})
+					bPos = origBIdx
+				}
+
+				// Add the equal element
+				result = append(result, DiffOp{
+					Type:   Equal,
+					AStart: origAIdx,
+					AEnd:   origAIdx + 1,
+					BStart: origBIdx,
+					BEnd:   origBIdx + 1,
+				})
+				aPos = origAIdx + 1
+				bPos = origBIdx + 1
+			}
+		} else if op.Type == Delete {
+			// Map Delete operation
+			for i := op.AStart; i < op.AEnd; i++ {
+				origAIdx := m.aToOrig[i]
+				if origAIdx > aPos {
+					// Gap before - these are also deletes
+					result = append(result, DiffOp{
+						Type:   Delete,
+						AStart: aPos,
+						AEnd:   origAIdx,
+						BStart: bPos,
+						BEnd:   bPos,
+					})
+				}
+				result = append(result, DiffOp{
+					Type:   Delete,
+					AStart: origAIdx,
+					AEnd:   origAIdx + 1,
+					BStart: bPos,
+					BEnd:   bPos,
+				})
+				aPos = origAIdx + 1
+			}
+		} else if op.Type == Insert {
+			// Map Insert operation
+			for i := op.BStart; i < op.BEnd; i++ {
+				origBIdx := m.bToOrig[i]
+				if origBIdx > bPos {
+					// Gap before - these are also inserts
+					result = append(result, DiffOp{
+						Type:   Insert,
+						AStart: aPos,
+						AEnd:   aPos,
+						BStart: bPos,
+						BEnd:   origBIdx,
+					})
+				}
+				result = append(result, DiffOp{
+					Type:   Insert,
+					AStart: aPos,
+					AEnd:   aPos,
+					BStart: origBIdx,
+					BEnd:   origBIdx + 1,
+				})
+				bPos = origBIdx + 1
+			}
 		}
-
-		if op.AEnd > 0 && op.AEnd <= len(m.aToOrig) {
-			mapped.AEnd = m.aToOrig[op.AEnd-1] + 1
-		} else if op.AEnd == 0 {
-			mapped.AEnd = mapped.AStart
-		} else if len(m.aToOrig) > 0 {
-			mapped.AEnd = m.aToOrig[len(m.aToOrig)-1] + 1
-		} else {
-			mapped.AEnd = m.origN
-		}
-
-		// Map B indices
-		if op.BStart < len(m.bToOrig) {
-			mapped.BStart = m.bToOrig[op.BStart]
-		} else if len(m.bToOrig) > 0 {
-			mapped.BStart = m.bToOrig[len(m.bToOrig)-1] + 1
-		} else {
-			mapped.BStart = 0
-		}
-
-		if op.BEnd > 0 && op.BEnd <= len(m.bToOrig) {
-			mapped.BEnd = m.bToOrig[op.BEnd-1] + 1
-		} else if op.BEnd == 0 {
-			mapped.BEnd = mapped.BStart
-		} else if len(m.bToOrig) > 0 {
-			mapped.BEnd = m.bToOrig[len(m.bToOrig)-1] + 1
-		} else {
-			mapped.BEnd = m.origM
-		}
-
-		result = append(result, mapped)
 	}
+
+	// Fill any remaining gap at the end
+	if aPos < m.origN {
+		result = append(result, DiffOp{
+			Type:   Delete,
+			AStart: aPos,
+			AEnd:   m.origN,
+			BStart: bPos,
+			BEnd:   bPos,
+		})
+	}
+	if bPos < m.origM {
+		result = append(result, DiffOp{
+			Type:   Insert,
+			AStart: m.origN,
+			AEnd:   m.origN,
+			BStart: bPos,
+			BEnd:   m.origM,
+		})
+	}
+
+	// Merge adjacent operations of the same type
+	return mergeOps(result)
+}
+
+// mergeOps merges adjacent operations of the same type.
+func mergeOps(ops []DiffOp) []DiffOp {
+	if len(ops) <= 1 {
+		return ops
+	}
+
+	result := make([]DiffOp, 0, len(ops))
+	current := ops[0]
+
+	for i := 1; i < len(ops); i++ {
+		op := ops[i]
+		if current.Type == op.Type && current.AEnd == op.AStart && current.BEnd == op.BStart {
+			current.AEnd = op.AEnd
+			current.BEnd = op.BEnd
+		} else {
+			result = append(result, current)
+			current = op
+		}
+	}
+	result = append(result, current)
 
 	return result
 }

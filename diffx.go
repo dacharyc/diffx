@@ -145,6 +145,9 @@ func DiffElements(a, b []Element, opts ...Option) []DiffOp {
 		}}
 	}
 
+	// Keep original sequences for postprocessing
+	origA, origB := a, b
+
 	// Create context and run algorithm
 	ctx := newDiffContext(a, b, o)
 
@@ -172,8 +175,9 @@ func DiffElements(a, b []Element, opts ...Option) []DiffOp {
 	}
 
 	// Postprocessing: shift boundaries for readability
+	// Use original sequences since ops now have original indices
 	if o.postprocessing {
-		ops = shiftBoundaries(ops, a, b)
+		ops = shiftBoundaries(ops, origA, origB)
 	}
 
 	return ops
