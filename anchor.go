@@ -36,23 +36,20 @@ func defaultAnchorOptions() *anchorOptions {
 	}
 }
 
-// eliminateWeakAnchors converts semantically incoherent Equal regions to changes.
-// This is applied after the main diff algorithm and before boundary shifting.
+// eliminateWeakAnchors was previously used to convert stopwords at Equal boundaries
+// to Delete+Insert pairs. However, this created confusing self-replacement patterns
+// like [-for-] {+for+} where the same word appeared both deleted and inserted.
 //
-// The main transformation is boundary trimming: stopwords at the edges of Equal
-// regions that are sandwiched between changes are converted to Delete+Insert pairs.
-// This produces cleaner output by not fragmenting unrelated text.
-//
-// Unlike earlier versions, we no longer apply aggressive "weak anchor" elimination
-// based on frequency, as this caused cascading effects where trimming one stopword
-// made adjacent non-stopwords appear sandwiched.
+// The histogram algorithm now handles stopword filtering during anchor selection,
+// so this post-processing is no longer needed. We keep the function for API
+// compatibility but it now just merges adjacent operations.
 func eliminateWeakAnchors(ops []DiffOp, a, b []Element) []DiffOp {
 	if len(ops) < 2 {
 		return ops
 	}
 
-	// Trim stopwords from Equal boundaries
-	ops = trimStopwordBoundaries(ops, a, b)
+	// No longer trim stopwords - this was creating self-replacement patterns
+	// The histogram algorithm already filters stopwords from being anchors
 
 	return mergeAdjacentOps(ops)
 }

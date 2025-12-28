@@ -33,9 +33,9 @@ type histogramOptions struct {
 
 func defaultHistogramOptions() *histogramOptions {
 	return &histogramOptions{
-		maxChainLength:  10, // Lower threshold for word-level diff
+		maxChainLength:  64, // Match Git's default; allow higher-frequency anchors
 		fallbackToMyers: true,
-		filterStopwords: true,
+		filterStopwords: true, // Filter stopwords for histogram anchors; Myers fallback finds others
 	}
 }
 
@@ -147,9 +147,11 @@ func histogramDiffRecursive(a, b []Element, aOffset, bOffset int, opts *histogra
 		aIndices[h] = append(aIndices[h], i)
 	}
 
-	// Find the best anchor: lowest-frequency element in B that exists in A
+	// Find the best anchor: consider both frequency AND position balance.
+	// We want low-frequency tokens, but also tokens that create balanced splits.
+	// Score = frequency * (1 + positionImbalance), lower is better.
 	bestIdx := -1
-	bestFreq := opts.maxChainLength + 1
+	bestScore := float64(opts.maxChainLength+1) * 3 // Initialize to impossible value
 	var bestHash uint64
 
 	for i, e := range b {
@@ -160,55 +162,88 @@ func histogramDiffRecursive(a, b []Element, aOffset, bOffset int, opts *histogra
 
 		h := e.Hash()
 		freq := aFreq[h]
-		if freq > 0 && freq < bestFreq {
-			bestFreq = freq
+		if freq <= 0 || freq > opts.maxChainLength {
+			continue
+		}
+
+		// Find the best matching position in A for this potential anchor
+		bRatio := float64(i) / float64(len(b))
+		bestPosImbalance := 2.0
+
+		for _, aIdx := range aIndices[h] {
+			if !a[aIdx].Equal(e) {
+				continue
+			}
+			aRatio := float64(aIdx) / float64(len(a))
+			imbalance := aRatio - bRatio
+			if imbalance < 0 {
+				imbalance = -imbalance
+			}
+			if imbalance < bestPosImbalance {
+				bestPosImbalance = imbalance
+			}
+		}
+
+		if bestPosImbalance > 1.5 {
+			continue // No valid match position found
+		}
+
+		// Score combines frequency and position imbalance
+		// Lower frequency is better, lower imbalance is better
+		score := float64(freq) * (1.0 + bestPosImbalance*2)
+
+		if score < bestScore {
+			bestScore = score
 			bestIdx = i
 			bestHash = h
 		}
 	}
 
-	// No good anchor found - fall back appropriately
-	// For small sections, use Myers which will find optimal matches.
-	// For larger sections, use simple delete+insert to avoid fragmentation.
-	if bestIdx == -1 || bestFreq > opts.maxChainLength {
-		// Small sections: use Myers to find optimal matches
-		// This handles cases like ["a", "b", "c"] vs ["a", "x", "c"] where
-		// even though "a" is a stopword, it should still match.
-		if opts.fallbackToMyers && len(a)+len(b) <= 20 {
+	// No good anchor found - fall back to Myers to find more anchors.
+	// Myers will find common subsequences that histogram missed.
+	// The anchor elimination post-processing will clean up bad stopword matches.
+	if bestIdx == -1 {
+		if opts.fallbackToMyers {
 			return myersFallback(a, b, aOffset, bOffset)
 		}
-		// Large sections with no good anchors: prefer clean delete+insert
-		// over fragmented output with spurious stopword matches
+		// Only use delete+insert if Myers fallback is disabled
 		return []DiffOp{
 			{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
 			{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},
 		}
 	}
 
-	// Find the matching position in A for this anchor
-	// Use the first occurrence for simplicity (could optimize for best position)
-	aMatchIdx := aIndices[bestHash][0]
+	// Find the best matching position in A for this anchor.
+	// Instead of picking the first occurrence, pick the one that creates
+	// the most balanced split (position ratio in A closest to position ratio in B).
+	bRatio := float64(bestIdx) / float64(len(b))
+	aMatchIdx := -1
+	bestRatioDiff := 2.0 // Initialize to impossible value
 
-	// Verify the match (hash collision check)
-	if !a[aMatchIdx].Equal(b[bestIdx]) {
-		// Hash collision - try other occurrences
-		found := false
-		for _, idx := range aIndices[bestHash] {
-			if a[idx].Equal(b[bestIdx]) {
-				aMatchIdx = idx
-				found = true
-				break
-			}
+	for _, idx := range aIndices[bestHash] {
+		// Verify hash collision
+		if !a[idx].Equal(b[bestIdx]) {
+			continue
 		}
-		if !found {
-			// No actual match - fall back
-			if opts.fallbackToMyers {
-				return myersFallback(a, b, aOffset, bOffset)
-			}
-			return []DiffOp{
-				{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
-				{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},
-			}
+		aRatio := float64(idx) / float64(len(a))
+		ratioDiff := aRatio - bRatio
+		if ratioDiff < 0 {
+			ratioDiff = -ratioDiff
+		}
+		if ratioDiff < bestRatioDiff {
+			bestRatioDiff = ratioDiff
+			aMatchIdx = idx
+		}
+	}
+
+	if aMatchIdx == -1 {
+		// No valid match found - fall back
+		if opts.fallbackToMyers {
+			return myersFallback(a, b, aOffset, bOffset)
+		}
+		return []DiffOp{
+			{Type: Delete, AStart: aOffset, AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset},
+			{Type: Insert, AStart: aOffset + len(a), AEnd: aOffset + len(a), BStart: bOffset, BEnd: bOffset + len(b)},
 		}
 	}
 
