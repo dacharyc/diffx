@@ -298,7 +298,7 @@ func filterSequence(elems []Element, classes []elementClass) ([]Element, []int) 
 				result = append(result, elems[i])
 				toOrig = append(toOrig, i)
 			}
-		// case discard: don't include
+			// case discard: don't include
 		}
 	}
 
