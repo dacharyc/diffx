@@ -353,11 +353,3 @@ func DiffElementsHistogram(a, b []Element, opts ...Option) []DiffOp {
 
 	return ops
 }
-
-// WithHistogram is an option to use histogram-style diff instead of Myers.
-// This can produce more readable output for files with many common elements.
-func WithHistogram(enabled bool) Option {
-	return func(o *options) {
-		o.useHistogram = enabled
-	}
-}

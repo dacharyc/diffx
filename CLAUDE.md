@@ -14,24 +14,23 @@ go test -v ./...
 
 # Run benchmarks
 go test -bench=. -benchmem ./...
-
-# Run comparison tool (compares against go-diff)
-go run ./cmd/compare
 ```
 
 ## Architecture
 
 ```
 diffx/
-├── diffx.go        # Public API: Diff(), DiffElements(), Options
-├── element.go      # Element interface, StringElement
-├── context.go      # diffContext (algorithm state), partition struct
-├── snake.go        # findMiddleSnake() - bidirectional Myers search
-├── compare.go      # compareSeq() - divide-and-conquer
-├── filter.go       # filterConfusingElements() - preprocessing
-├── shift.go        # shiftBoundaries() - postprocessing
-├── diffx_test.go   # Unit tests
-└── cmd/compare/    # Comparison tool against other diff libraries
+├── diffx.go          # Public API: Diff(), DiffElements(), Options
+├── element.go        # Element interface, StringElement
+├── context.go        # diffContext (algorithm state), partition struct
+├── snake.go          # findMiddleSnake() - bidirectional Myers search
+├── compare.go        # compareSeq() - divide-and-conquer
+├── filter.go         # filterConfusingElements() - preprocessing
+├── shift.go          # shiftBoundaries() - postprocessing
+├── histogram.go      # Histogram-style diff algorithm
+├── anchor.go         # Anchor elimination post-processing
+├── *_test.go         # Unit tests per module
+└── example_test.go   # Runnable examples for godoc
 ```
 
 ## Algorithm Pipeline
@@ -72,11 +71,6 @@ Input → filterConfusingElements() → compareSeq() → mapOps() → shiftBound
 - Empty sequences, equal sequences, all different
 - Property test: applying diff to A produces B
 - Fox example: verifies "fox" preserved as anchor
-
-### Comparison Tests (`cmd/compare`)
-- Compares against `github.com/sergi/go-diff/diffmatchpatch`
-- Tests: small sequences, prose, code tokens, large files
-- Metrics: operation count, change regions, timing
 
 ### Key Test Cases
 

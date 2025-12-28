@@ -44,13 +44,12 @@ type DiffOp struct {
 
 // options holds configuration for the diff algorithm.
 type options struct {
-	useHeuristic       bool
-	forceMinimal       bool
-	costLimit          int
-	preprocessing      bool
-	postprocessing     bool
-	anchorElimination  bool
-	useHistogram       bool
+	useHeuristic      bool
+	forceMinimal      bool
+	costLimit         int
+	preprocessing     bool
+	postprocessing    bool
+	anchorElimination bool
 }
 
 // defaultOptions returns options with sensible defaults.
@@ -112,22 +111,19 @@ func WithPostprocessing(enabled bool) Option {
 	}
 }
 
-// Diff compares two string slices and returns edit operations.
+// Diff compares two string slices using the Myers algorithm.
+// For histogram-style diff, use DiffHistogram instead.
 func Diff(a, b []string, opts ...Option) []DiffOp {
 	return DiffElements(toElements(a), toElements(b), opts...)
 }
 
-// DiffElements compares arbitrary Element slices.
+// DiffElements compares arbitrary Element slices using the Myers algorithm.
+// For histogram-style diff, use DiffElementsHistogram instead.
 func DiffElements(a, b []Element, opts ...Option) []DiffOp {
 	// Apply options
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
-	}
-
-	// Use histogram diff if requested
-	if o.useHistogram {
-		return DiffElementsHistogram(a, b, opts...)
 	}
 
 	// Handle trivial cases
