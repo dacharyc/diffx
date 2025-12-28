@@ -2,6 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/dacharyc/diffx.svg)](https://pkg.go.dev/github.com/dacharyc/diffx)
 [![Go Report Card](https://goreportcard.com/badge/github.com/dacharyc/diffx)](https://goreportcard.com/report/github.com/dacharyc/diffx)
+[![Tests](https://github.com/dacharyc/diffx/actions/workflows/test.yml/badge.svg)](https://github.com/dacharyc/diffx/actions/workflows/test.yml)
 
 A Go diffing library implementing the Myers O(ND) algorithm with heuristics for better output quality. Designed for use cases where readability of diff output matters more than minimal edit distance.
 
